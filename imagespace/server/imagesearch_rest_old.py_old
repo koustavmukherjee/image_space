@@ -28,7 +28,7 @@ import requests
 
 setting = ImageSpaceSetting()
 
-#ENV IMAGE_SPACE_ELASTIC_SEARCH=http://localhost:9200/imagespace
+
 class ImageSearch(Resource):
     def __init__(self):
         self.resourceName = 'imagesearch'
@@ -44,11 +44,23 @@ class ImageSearch(Resource):
 
     def _imageSearch(self, params):
         limit = params['limit'] if 'limit' in params else '100'
-        query = params['query'] if 'query' in params else { "match_all":{} }
+        query = params['query'] if 'query' in params else '*:*'
         offset = params['offset'] if 'offset' in params else '0'
-        base = 'http://imagespace-elasticsearch:9200/imagespace' + '/_search'
+        classifications = json.loads(params['classifications']) if 'classifications' in params else []
+        base = setting.get('IMAGE_SPACE_SOLR') + '/select'
 
-        qparams = { "query":{ "match_all":{} }, "size":limit, "from":offset }
+        if classifications:
+            query += ' AND (%s)' % ' OR '.join(['%s:[.7 TO *]' % key
+                                                for key in classifications])
+
+        qparams = {
+            'wt': 'json',
+            'hl': 'true',
+            'hl.fl': '*',
+            'q': query,
+            'start': offset,
+            'rows': limit
+        }
 
         # Give plugins a chance to adjust the Solr query parameters
         event = events.trigger('imagespace.imagesearch.qparams', qparams)
@@ -56,26 +68,22 @@ class ImageSearch(Resource):
             qparams = response
 
         try:
-            result = requests.get(base, data=json.dumps(qparams), headers={'Content-Type':'application/json'}).json()
+            result = requests.get(base, params=qparams, verify=False).json()
         except ValueError:
             return []
 
-        docs = []
         try:
-            for row in result['hits']['hits']:
-                doc = {}
-                doc['id'] = row['_source']['id']
-                doc['sha1sum_s_md'] = row['_source']['sha1sum_s_md']
-                docs.append(doc)
+            for image in result['response']['docs']:
+                image['highlight'] = result['highlighting'][image['id']]
         except KeyError:
             return {
                 'numFound': 0,
-                'docs': docs
+                'docs': []
             }
 
         response = {
-            'numFound': result['_shards']['total'],
-            'docs': docs
+            'numFound': result['response']['numFound'],
+            'docs': result['response']['docs']
         }
 
         # Give plugins a chance to adjust the end response of the imagesearch
